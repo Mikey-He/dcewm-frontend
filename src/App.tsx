@@ -1,9 +1,8 @@
 // src/App.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   FORMATS,
   PERIOD_CATEGORIES,
-  COLUMNS,
   fetchDropdownData,
   fetchTableData,
   downloadCSV,
@@ -12,6 +11,8 @@ import {
 import type { Filters } from "./lib/api";
 import { Dropdown } from "./components/Dropdown";
 import { PreviewTable } from "./components/PreviewTable";
+
+const clampPerPage = (n: number) => Math.max(1, Math.min(50, Math.floor(n || 1)));
 
 const DEFAULT_FILTERS: Filters = {
   resource: "PUE",
@@ -25,8 +26,6 @@ const DEFAULT_FILTERS: Filters = {
   perPage: 10,
   format: "JSON",
 };
-
-const clampPerPage = (n: number) => Math.max(1, Math.min(50, Math.floor(n || 1)));
 
 const App: React.FC = () => {
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
@@ -42,6 +41,9 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // prevent out-of-order updates when clicking fast
+  const reqSeqRef = useRef(0);
+
   // load dropdowns whenever resource changes
   useEffect(() => {
     (async () => {
@@ -49,28 +51,53 @@ const App: React.FC = () => {
       setProviders(providers);
       setCountries(countries);
       setRegions(regions);
-      // reset provider/countries/region when resource changes
+      // reset provider/countries/region on resource change
       setFilters((f) => ({ ...f, provider: "", countries: [], region: "(Any)" }));
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.resource]);
 
   const updateFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handlePreview = async () => {
+  /**
+   * Fetch preview data.
+   * If `overrides` is provided (e.g., { page: 2 }), it will fetch using the merged
+   * filters immediately and then commit the merged filters to state when successful.
+   */
+  const handlePreview = async (overrides?: Partial<Filters>) => {
+    // build effective filters for this request
+    const eff: Filters = {
+      ...filters,
+      ...overrides,
+      page: Math.max(1, overrides?.page ?? filters.page),
+      perPage: clampPerPage(overrides?.perPage ?? filters.perPage),
+    };
+
     setLoading(true);
     setError(null);
+    const seq = ++reqSeqRef.current;
+
     try {
-      const { data, total } = await fetchTableData(filters);
+      const { data, total } = await fetchTableData(eff);
+      // drop stale responses
+      if (seq !== reqSeqRef.current) return;
+
       setRows(data);
       setTotalRows(total);
+
+      // when overrides are used (paging), persist them to filters after success
+      if (overrides && Object.keys(overrides).length) {
+        setFilters(eff);
+      }
     } catch (e: any) {
+      if (seq !== reqSeqRef.current) return;
       setRows([]);
       setTotalRows(0);
       setError(e?.message || "Failed to fetch");
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) setLoading(false);
     }
   };
 
@@ -84,7 +111,10 @@ const App: React.FC = () => {
     }
   };
 
-  const formatButtonText = useMemo(() => (filters.format === "CSV" ? "Download CSV" : "Download JSON"), [filters.format]);
+  const formatButtonText = useMemo(
+    () => (filters.format === "CSV" ? "Download CSV" : "Download JSON"),
+    [filters.format]
+  );
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -96,7 +126,7 @@ const App: React.FC = () => {
             <a href="https://github.com/Mikey-He/dcewm-frontend" target="_blank" rel="noreferrer" className="hover:underline">
               GitHub
             </a>
-            <a href="#" className="hover:underline">
+            <a href="/docs" target="_blank" rel="noreferrer" className="hover:underline">
               API Docs
             </a>
           </nav>
@@ -131,7 +161,8 @@ const App: React.FC = () => {
               <Dropdown
                 value={filters.provider}
                 onChange={(v) => {
-                  updateFilter("provider", Array.isArray(v) ? v[0] ?? "" : v);
+                  const next = Array.isArray(v) ? v[0] ?? "" : v;
+                  updateFilter("provider", next);
                   updateFilter("page", 1);
                 }}
                 options={providers}
@@ -160,7 +191,7 @@ const App: React.FC = () => {
               />
             </div>
 
-            {/* IEA Region (single select) */}
+            {/* IEA Region (single) */}
             <div>
               <label className="block text-sm font-medium text-gray-700">IEA Region</label>
               <select
@@ -283,7 +314,7 @@ const App: React.FC = () => {
           {/* actions */}
           <div className="mt-4 flex items-center gap-3">
             <button
-              onClick={handlePreview}
+              onClick={() => handlePreview()}
               className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-white font-medium shadow-sm hover:bg-blue-700 focus:outline-none"
             >
               🔍 Preview
@@ -308,11 +339,9 @@ const App: React.FC = () => {
             perPage={filters.perPage}
             total={totalRows}
             onPageChange={(newPage) => {
+              // fetch using the new page RIGHT AWAY (no stale state)
               const next = Math.max(1, newPage);
-              if (next !== filters.page) {
-                updateFilter("page", next);
-                handlePreview();
-              }
+              handlePreview({ page: next });
             }}
           />
         </section>

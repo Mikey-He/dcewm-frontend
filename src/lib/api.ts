@@ -85,8 +85,8 @@ const normalizeList = (list: string[]) => {
   return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
 };
 
-/** Build PostgREST-style query string. */
-export const buildQueryString = (f: Filters) => {
+/** Build ONLY the filter params (no pagination). Used by both data and count requests. */
+const buildFilterParams = (f: Filters) => {
   const params = new URLSearchParams();
 
   // provider (ilike)
@@ -110,14 +110,18 @@ export const buildQueryString = (f: Filters) => {
     params.append("time_period_category", `eq.${f.periodCategory}`);
   }
 
-  // time range
+  // time range (support both gte and lte on the same key)
   if (f.valueFrom) params.append("time_period_value", `gte.${f.valueFrom}`);
   if (f.valueTo) params.append("time_period_value", `lte.${f.valueTo}`);
 
-  // pagination
+  return params;
+};
+
+/** Build full query string including pagination. */
+export const buildQueryString = (f: Filters) => {
+  const params = buildFilterParams(f);
   params.append("page", String(Math.max(1, f.page)));
   params.append("per_page", String(clampPerPage(f.perPage)));
-
   return params.toString();
 };
 
@@ -181,18 +185,38 @@ export const fetchDropdownData = async (
 
 // ---------- table data ----------
 
+/** Fallback count via PostgREST aggregation: select=count:count() */
+const fetchTotalCount = async (resource: string, filters: Filters): Promise<number> => {
+  const params = buildFilterParams(filters);
+  params.append("select", "count:count()");
+  const url = `${API_BASE}/${resource}?${params.toString()}`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    // final fallback: 0 (UI will still work but show single page)
+    return 0;
+  }
+  const arr = await res.json();
+  // Expecting: [{ count: 26 }]
+  const val =
+    Array.isArray(arr) && arr.length
+      ? Number(arr[0]?.count ?? arr[0]?.COUNT ?? Object.values(arr[0] || {})[0])
+      : 0;
+  return Number.isFinite(val) ? val : 0;
+};
+
 export const fetchTableData = async (filters: Filters): Promise<{ data: any[]; total: number }> => {
   const resource = filters.resource.toLowerCase();
   const query = buildQueryString(filters);
   const url = `${API_BASE}/${resource}?${query}`;
 
-  // Try to request exact count first; if the server blocks the preflight (CORS),
-  // fall back to a plain fetch without custom headers.
+  // Try to request exact count (may trigger CORS preflight); if it throws,
+  // fall back to plain fetch without custom headers.
   let res: Response | null = null;
   try {
     res = await fetch(url, { headers: { Prefer: "count=exact" } });
   } catch {
-    // swallow and retry without custom headers
+    // ignore and retry below
   }
   if (!res) res = await fetch(url);
 
@@ -203,17 +227,25 @@ export const fetchTableData = async (filters: Filters): Promise<{ data: any[]; t
 
   const data = await res.json();
 
-  // Parse total from common headers; fallback to page length if missing
+  // Try to read total from headers
   let total: number | null = null;
   const h1 = res.headers.get("x-total");
   const h2 = res.headers.get("x-total-count");
-  const h3 = res.headers.get("content-range"); // e.g., "0-49/123"
+  const h3 = res.headers.get("content-range"); // e.g., "0-4/26"
   const pick = h1 || h2 || h3;
   if (pick) {
     const m = /\/(\d+)$/.exec(pick) || /^(\d+)$/.exec(pick);
     if (m) total = parseInt(m[1], 10);
   }
-  if (!Number.isFinite(total as any)) total = Array.isArray(data) ? data.length : 0;
+
+  // If headers are missing (common with simple CORS), do an aggregated count request.
+  if (!Number.isFinite(total as any)) {
+    total = await fetchTotalCount(resource, filters);
+    // As a last resort, keep UI alive using current page length
+    if (!Number.isFinite(total as any) || total === 0) {
+      total = Array.isArray(data) ? data.length : 0;
+    }
+  }
 
   return { data: Array.isArray(data) ? data : [], total: total as number };
 };
