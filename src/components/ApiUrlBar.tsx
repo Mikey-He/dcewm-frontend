@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Copy, ExternalLink, Link as LinkIcon, Terminal } from "lucide-react";
 
 type ApiUrlBarProps = {
@@ -10,20 +10,19 @@ type ApiUrlBarProps = {
 export default function ApiUrlBar({ jsonUrl, csvUrl, compact = false }: ApiUrlBarProps) {
   const [mode, setMode] = useState<"JSON" | "CSV" | "cURL">("JSON");
 
+  // Display string for the current mode.
   const display = useMemo(() => {
-    if (mode === "cURL") {
-      // derive curl from the two URLs to avoid extra props
-      const url = jsonUrl; // default to JSON curl; user can switch to CSV via the mode
-      return `curl -sL '${mode === "CSV" ? csvUrl : url}'`;
-    }
-    return mode === "CSV" ? csvUrl : jsonUrl;
+    if (mode === "JSON") return jsonUrl;
+    if (mode === "CSV") return csvUrl;
+    // cURL mode (default to JSON endpoint for now)
+    return `curl -sL '${jsonUrl}'`;
   }, [mode, jsonUrl, csvUrl]);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(display);
     } catch {
-      // Fallback
+      // Fallback for older browsers
       const ta = document.createElement("textarea");
       ta.value = display;
       document.body.appendChild(ta);
@@ -34,6 +33,7 @@ export default function ApiUrlBar({ jsonUrl, csvUrl, compact = false }: ApiUrlBa
   }
 
   function openInNew() {
+    if (mode === "cURL") return; // nothing to open for cURL text
     const url = mode === "CSV" ? csvUrl : jsonUrl;
     window.open(url, "_blank", "noopener,noreferrer");
   }
