@@ -85,6 +85,7 @@ function normalizeCountries(list: string[]) {
   return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
 }
 
+// --- IEA regions (canonical 8) ---
 const IEA_REGIONS = [
   "(Any)",
   "Africa",
@@ -96,13 +97,16 @@ const IEA_REGIONS = [
   "Middle East",
   "North America",
 ] as const;
-const IEA_SET = new Set(IEA_REGIONS.slice(1).map((r) => r.toLowerCase()));
 
+// Use a string set to compare in lowercase.
+const IEA_SET = new Set<string>(IEA_REGIONS.slice(1).map((r) => r.toLowerCase()));
+
+/** Fold common synonyms/variants to the canonical 8 names. */
 function foldRegionSynonym(v: string): string | null {
   const lc = v.toLowerCase().trim();
   if (!lc) return null;
 
-  // keep CSA as one token (fold common variants)
+  // Keep CSA as one token (fold to the canonical label)
   if (
     lc === "central & south america" ||
     lc === "central and south america" ||
@@ -114,16 +118,21 @@ function foldRegionSynonym(v: string): string | null {
     return "Central & South America";
   }
 
+  // Exact canonical (case-insensitive)
   if (IEA_SET.has(lc)) {
-    const proper = IEA_REGIONS.find((x) => x.toLowerCase() === lc)!;
-    return proper;
+    // Cast to string because we return string (not the literal union)
+    return IEA_REGIONS.find((x) => x.toLowerCase() === lc) as unknown as string;
   }
+
   return null;
 }
 
-/** Normalize the Regions dropdown to 8 IEA regions only. */
+/** Normalize Regions dropdown to only the 8 IEA regions. */
 function normalizeRegions(list: string[]) {
-  const order = new Map(IEA_REGIONS.map((v, i) => [v, i]));
+  // Important: make the key type string to avoid TS2345
+  const order = new Map<string, number>(
+    (IEA_REGIONS as readonly string[]).map((v, i) => [v, i])
+  );
   const CSA_PLACEHOLDER = "__CSA__";
 
   const items: string[] = [];
@@ -131,7 +140,7 @@ function normalizeRegions(list: string[]) {
     let s = String(raw || "");
     if (!s.trim()) continue;
 
-    // protect CSA before splitting
+    // Protect CSA before splitting
     s = s.replace(
       /(central\s*&\s*south\s*america|central\s+and\s+south\s+america|central\s*\/\s*south\s*america|central\s+south\s+america)/gi,
       CSA_PLACEHOLDER
@@ -158,6 +167,7 @@ function normalizeRegions(list: string[]) {
 
   return ["(Any)", ...uniq];
 }
+
 
 // ---------------------------------------------------------------------
 // Query builders (contains-any semantics for region & countries)
