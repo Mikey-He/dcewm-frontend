@@ -2,9 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React + TS</title>
+    <title>DCEWM</title>
+
+    <!-- Early theme script: runs BEFORE React mounts / CSS paints -->
+    <script>
+      (function () {
+        try {
+          var key = 'theme'; // localStorage key: 'dark' | 'light'
+          var t = localStorage.getItem(key);
+          if (!t) {
+            // no saved choice -> follow OS preference
+            t = window.matchMedia &&
+                window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+          }
+          if (t === 'dark') {
+            // add 'dark' to <html> so Tailwind dark: styles apply
+            document.documentElement.classList.add('dark');
+          }
+          //  set color-scheme for built-in form controls, scrollbars, etc.
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {
+          /* ignore */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

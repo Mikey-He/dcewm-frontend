@@ -1,10 +1,11 @@
 // src/lib/api.ts
-// Public API helpers, shared types, and constants
+// Public API helpers for DCEWM
 
 export const API_BASE = "https://dcewm-api.hcfmike040210.workers.dev/v1";
 
 export type Resource = "PUE" | "WUE";
 
+// ----- Table columns (snake_case) -----
 export const COLUMNS: Record<Resource, string[]> = {
   PUE: [
     "company_name",
@@ -48,76 +49,162 @@ export const COLUMNS: Record<Resource, string[]> = {
   ],
 };
 
-export const PERIOD_CATEGORIES = [
-  "(Any)",
-  "Annual",
-  "Quarterly",
-  "Monthly",
-  "Not evident",
-  "Any",
-] as const;
-
+// ----- UI lists -----
+export const PERIOD_CATEGORIES = ["(Any)", "Annual", "Quarterly", "Monthly", "Not evident", "Any"] as const;
 export const FORMATS = ["JSON", "CSV"] as const;
 
 export type Filters = {
   resource: Resource;
   provider: string;
-  countries: string[]; // OR semantics
-  region: string; // "(Any)" means no filter
-  periodCategory: string; // "(Any)" means no filter
+  countries: string[];    // multi-select
+  region: string;         // single-select; "(Any)" = no filter
+  periodCategory: string; // "(Any)" = no filter
   valueFrom: string;
   valueTo: string;
   page: number;
-  perPage: number; // clamped to 1..50
+  perPage: number;        // clamp 1..50
   format: "JSON" | "CSV";
 };
 
-// ---------- helpers ----------
+// ---------------------------------------------------------------------
+// Normalizers for dropdowns
+// ---------------------------------------------------------------------
 
-const clampPerPage = (n: number) => Math.max(1, Math.min(50, Math.floor(n || 1)));
-
-/** Split combined strings into atomic items and dedupe/sort. */
-const normalizeList = (list: string[]) => {
+/** Split multi-country strings into single countries.
+ *  We DO NOT split on '&' so names like "Trinidad & Tobago" stay intact.
+ */
+function normalizeCountries(list: string[]) {
   const tokens = list
-    .flatMap((s) => String(s).split(/[,/|;]|(?:\s+and\s+)|(?:\s*&\s*)/i))
-    .map((s) => s.trim())
+    .flatMap((s) =>
+      String(s)
+        .split(/[,/|;]|(?:\s+and\s+)/i) // commas, '/', '|', ';', or " and "
+        .map((t) => t.trim())
+    )
     .filter(Boolean);
-  return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
-};
 
-/** Build ONLY the filter params (no pagination). Used by both data and count requests. */
-const buildFilterParams = (f: Filters) => {
+  return Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b));
+}
+
+const IEA_REGIONS = [
+  "(Any)",
+  "Africa",
+  "Asia Pacific",
+  "Central & South America",
+  "Eurasia",
+  "Europe",
+  "Global",
+  "Middle East",
+  "North America",
+] as const;
+const IEA_SET = new Set(IEA_REGIONS.slice(1).map((r) => r.toLowerCase()));
+
+function foldRegionSynonym(v: string): string | null {
+  const lc = v.toLowerCase().trim();
+  if (!lc) return null;
+
+  // keep CSA as one token (fold common variants)
+  if (
+    lc === "central & south america" ||
+    lc === "central and south america" ||
+    lc === "central/south america" ||
+    lc === "central south america" ||
+    lc === "south america" ||
+    lc === "central america"
+  ) {
+    return "Central & South America";
+  }
+
+  if (IEA_SET.has(lc)) {
+    const proper = IEA_REGIONS.find((x) => x.toLowerCase() === lc)!;
+    return proper;
+  }
+  return null;
+}
+
+/** Normalize the Regions dropdown to 8 IEA regions only. */
+function normalizeRegions(list: string[]) {
+  const order = new Map(IEA_REGIONS.map((v, i) => [v, i]));
+  const CSA_PLACEHOLDER = "__CSA__";
+
+  const items: string[] = [];
+  for (const raw of list) {
+    let s = String(raw || "");
+    if (!s.trim()) continue;
+
+    // protect CSA before splitting
+    s = s.replace(
+      /(central\s*&\s*south\s*america|central\s+and\s+south\s+america|central\s*\/\s*south\s*america|central\s+south\s+america)/gi,
+      CSA_PLACEHOLDER
+    );
+
+    const parts = s
+      .split(/[,/|;]|(?:\s+and\s+)/i)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((t) => (t === CSA_PLACEHOLDER ? "Central & South America" : t));
+
+    for (const p of parts) {
+      const f = foldRegionSynonym(p);
+      if (f) items.push(f);
+    }
+  }
+
+  const uniq = Array.from(new Set(items));
+  uniq.sort((a, b) => {
+    const ia = order.get(a) ?? 999;
+    const ib = order.get(b) ?? 999;
+    return ia - ib || a.localeCompare(b);
+  });
+
+  return ["(Any)", ...uniq];
+}
+
+// ---------------------------------------------------------------------
+// Query builders (contains-any semantics for region & countries)
+// ---------------------------------------------------------------------
+
+/** Remove asterisks so they don't break ilike patterns. */
+function escapeIlike(value: string) {
+  return value.replace(/\*/g, "");
+}
+
+/** Build PostgREST query parameters. */
+function buildFilterParams(f: Filters) {
   const params = new URLSearchParams();
 
-  // provider (ilike)
+  // Provider: fuzzy (unchanged)
   if (f.provider?.trim()) {
-    params.append("company_name", `ilike.*${f.provider.trim()}*`);
+    params.append("company_name", `ilike.*${escapeIlike(f.provider.trim())}*`);
   }
 
-  // countries (in)
-  if (f.countries?.length) {
-    const quoted = f.countries.map((c) => `"${c.replace(/"/g, '\\"')}"`).join(",");
-    params.append("country", `in.(${quoted})`);
+  // Countries: one OR group of ilike parts → matches ANY selected country
+  if (f.countries && f.countries.length > 0) {
+    const orParts = f.countries
+      .filter(Boolean)
+      .map((c) => `country.ilike.*${escapeIlike(c)}*`)
+      .join(",");
+    params.append("or", `(${orParts})`);
   }
 
-  // region (eq)
+  // Region: contains semantics with ilike
   if (f.region && f.region !== "(Any)") {
-    params.append("region", `eq.${f.region}`);
+    params.append("region", `ilike.*${escapeIlike(f.region)}*`);
   }
 
-  // period category (eq)
+  // Period category: exact
   if (f.periodCategory && f.periodCategory !== "(Any)") {
     params.append("time_period_category", `eq.${f.periodCategory}`);
   }
 
-  // time range (support both gte and lte on the same key)
+  // Time window (AND)
   if (f.valueFrom) params.append("time_period_value", `gte.${f.valueFrom}`);
-  if (f.valueTo) params.append("time_period_value", `lte.${f.valueTo}`);
+  if (f.valueTo)   params.append("time_period_value",   `lte.${f.valueTo}`);
 
   return params;
-};
+}
 
-/** Build full query string including pagination. */
+const clampPerPage = (n: number) => Math.max(1, Math.min(50, Math.floor(n || 1)));
+
 export const buildQueryString = (f: Filters) => {
   const params = buildFilterParams(f);
   params.append("page", String(Math.max(1, f.page)));
@@ -125,11 +212,13 @@ export const buildQueryString = (f: Filters) => {
   return params.toString();
 };
 
-// ---------- dropdown data ----------
+// ---------------------------------------------------------------------
+// Dropdown loaders
+// ---------------------------------------------------------------------
 
-export const fetchDropdownData = async (
+export async function fetchDropdownData(
   resource: Resource
-): Promise<{ providers: string[]; countries: string[]; regions: string[] }> => {
+): Promise<{ providers: string[]; countries: string[]; regions: string[] }> {
   const r = resource.toLowerCase();
 
   try {
@@ -139,85 +228,66 @@ export const fetchDropdownData = async (
       fetch(`${API_BASE}/${r}_regions`),
     ]);
 
-    if (!pRes.ok || !cRes.ok || !rgRes.ok) {
-      console.error("Dropdown endpoints failed", {
-        providers: pRes.status,
-        countries: cRes.status,
-        regions: rgRes.status,
-      });
-      return { providers: [], countries: [], regions: ["(Any)"] };
-    }
-
     let providers: string[] = [];
     let countries: string[] = [];
     let regions: string[] = ["(Any)"];
 
-    try {
-      const d = await pRes.json();
-      providers = Array.isArray(d) ? d.map((x: any) => x?.company_name).filter(Boolean) : [];
+    if (pRes.ok) {
+      const data = await pRes.json();
+      providers = Array.isArray(data) ? data.map((x: any) => x?.company_name).filter(Boolean) : [];
       providers = Array.from(new Set(providers)).sort((a, b) => a.localeCompare(b));
-    } catch (e) {
-      console.error("providers json parse", e);
     }
 
-    try {
-      const d = await cRes.json();
-      const raw = Array.isArray(d) ? d.map((x: any) => x?.country).filter(Boolean) : [];
-      countries = normalizeList(raw);
-    } catch (e) {
-      console.error("countries json parse", e);
+    if (cRes.ok) {
+      const data = await cRes.json();
+      const raw = Array.isArray(data) ? data.map((x: any) => x?.country).filter(Boolean) : [];
+      countries = normalizeCountries(raw);
     }
 
-    try {
-      const d = await rgRes.json();
-      const raw = Array.isArray(d) ? d.map((x: any) => x?.region).filter(Boolean) : [];
-      regions = ["(Any)", ...normalizeList(raw)];
-    } catch (e) {
-      console.error("regions json parse", e);
+    if (rgRes.ok) {
+      const data = await rgRes.json();
+      const raw = Array.isArray(data) ? data.map((x: any) => x?.region).filter(Boolean) : [];
+      regions = normalizeRegions(raw);
     }
 
     return { providers, countries, regions };
-  } catch (err) {
-    console.error("fetchDropdownData error", err);
+  } catch {
     return { providers: [], countries: [], regions: ["(Any)"] };
   }
-};
+}
 
-// ---------- table data ----------
+// ---------------------------------------------------------------------
+// Table data + downloads
+// ---------------------------------------------------------------------
 
-/** Fallback count via PostgREST aggregation: select=count:count() */
-const fetchTotalCount = async (resource: string, filters: Filters): Promise<number> => {
+/** Fallback aggregate count when headers are missing. */
+async function fetchTotalCount(resource: string, filters: Filters): Promise<number> {
   const params = buildFilterParams(filters);
   params.append("select", "count:count()");
   const url = `${API_BASE}/${resource}?${params.toString()}`;
-
   const res = await fetch(url);
-  if (!res.ok) {
-    // final fallback: 0 (UI will still work but show single page)
-    return 0;
-  }
+  if (!res.ok) return 0;
+
   const arr = await res.json();
-  // Expecting: [{ count: 26 }]
   const val =
     Array.isArray(arr) && arr.length
       ? Number(arr[0]?.count ?? arr[0]?.COUNT ?? Object.values(arr[0] || {})[0])
       : 0;
-  return Number.isFinite(val) ? val : 0;
-};
 
-export const fetchTableData = async (filters: Filters): Promise<{ data: any[]; total: number }> => {
+  return Number.isFinite(val) ? val : 0;
+}
+
+export async function fetchTableData(
+  filters: Filters
+): Promise<{ data: any[]; total: number }> {
   const resource = filters.resource.toLowerCase();
   const query = buildQueryString(filters);
   const url = `${API_BASE}/${resource}?${query}`;
 
-  // Try to request exact count (may trigger CORS preflight); if it throws,
-  // fall back to plain fetch without custom headers.
   let res: Response | null = null;
   try {
     res = await fetch(url, { headers: { Prefer: "count=exact" } });
-  } catch {
-    // ignore and retry below
-  }
+  } catch {}
   if (!res) res = await fetch(url);
 
   if (!res.ok) {
@@ -227,36 +297,34 @@ export const fetchTableData = async (filters: Filters): Promise<{ data: any[]; t
 
   const data = await res.json();
 
-  // Try to read total from headers
+  // Try headers for total
   let total: number | null = null;
   const h1 = res.headers.get("x-total");
   const h2 = res.headers.get("x-total-count");
-  const h3 = res.headers.get("content-range"); // e.g., "0-4/26"
+  const h3 = res.headers.get("content-range"); // e.g., "0-9/92"
   const pick = h1 || h2 || h3;
   if (pick) {
     const m = /\/(\d+)$/.exec(pick) || /^(\d+)$/.exec(pick);
     if (m) total = parseInt(m[1], 10);
   }
 
-  // If headers are missing (common with simple CORS), do an aggregated count request.
+  // Fallback aggregation
   if (!Number.isFinite(total as any)) {
     total = await fetchTotalCount(resource, filters);
-    // As a last resort, keep UI alive using current page length
     if (!Number.isFinite(total as any) || total === 0) {
       total = Array.isArray(data) ? data.length : 0;
     }
   }
 
   return { data: Array.isArray(data) ? data : [], total: total as number };
-};
+}
 
-// ---------- downloads ----------
-
-export const downloadJSON = async (filters: Filters) => {
+export async function downloadJSON(filters: Filters) {
   const r = filters.resource.toLowerCase();
   const url = `${API_BASE}/${r}?${buildQueryString(filters)}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("Download failed");
+
   const blob = new Blob([await res.text()], { type: "application/json" });
   const href = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement("a"), {
@@ -267,13 +335,14 @@ export const downloadJSON = async (filters: Filters) => {
   a.click();
   a.remove();
   URL.revokeObjectURL(href);
-};
+}
 
-export const downloadCSV = async (filters: Filters) => {
+export async function downloadCSV(filters: Filters) {
   const r = filters.resource.toLowerCase();
   const url = `${API_BASE}/${r}.csv?${buildQueryString(filters)}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("Download failed");
+
   const blob = await res.blob();
   const href = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement("a"), {
@@ -284,4 +353,4 @@ export const downloadCSV = async (filters: Filters) => {
   a.click();
   a.remove();
   URL.revokeObjectURL(href);
-};
+}
