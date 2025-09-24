@@ -364,3 +364,18 @@ export async function downloadCSV(filters: Filters) {
   a.remove();
   URL.revokeObjectURL(href);
 }
+
+// --- Helpers to expose current API URL(s) for the UI ---
+
+export function makeApiUrl(filters: Filters, forceFormat?: "JSON" | "CSV"): string {
+  const res = filters.resource.toLowerCase();
+  const fmt = forceFormat ?? filters.format ?? "JSON";
+  const basePath = fmt === "CSV" ? `${API_BASE}/${res}.csv` : `${API_BASE}/${res}`;
+  return `${basePath}?${buildQueryString(filters)}`;
+}
+
+export function makeCurl(filters: Filters, forceFormat?: "JSON" | "CSV"): string {
+  const url = makeApiUrl(filters, forceFormat);
+  // .csv path already ensures CSV; JSON is default. Keep headers minimal.
+  return `curl -sL '${url}'`;
+}

@@ -7,7 +7,11 @@ import {
   fetchTableData,
   downloadCSV,
   downloadJSON,
+  API_BASE, 
+  buildQueryString,
 } from "./lib/api";
+import ApiUrlBar from "./components/ApiUrlBar"; 
+
 import type { Filters } from "./lib/api";
 import { Dropdown } from "./components/Dropdown";
 import { PreviewTable } from "./components/PreviewTable";
@@ -366,7 +370,18 @@ const App: React.FC = () => {
             </div>
           )}
         </section>
-
+          
+        {/* API URL (reflects current filters) */}
+        <section className="mt-4">
+          {(() => {
+            const q = buildQueryString(filters);
+            const base = `${API_BASE}/${filters.resource.toLowerCase()}`;
+            const jsonUrl = `${base}?${q}`;
+            const csvUrl  = `${base}.csv?${q}`;
+            return <ApiUrlBar jsonUrl={jsonUrl} csvUrl={csvUrl} />;
+          })()}
+        </section>
+        
         {/* Table */}
         <section className="mt-6">
           <PreviewTable
