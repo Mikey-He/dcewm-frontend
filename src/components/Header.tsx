@@ -12,7 +12,7 @@ export const Header: React.FC = () => {
       <div className="mx-auto max-w-7xl px-6 py-4 flex items-center justify-between">
         <div className="flex items-baseline gap-3">
           <h1 className="text-xl font-bold tracking-tight text-gray-900 dark:text-gray-100">
-            Data Center Energy and Water Monitor
+            Data Center Energy and Water Monitor API Tool
           </h1>
           <span className="text-xs font-mono bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 rounded px-1.5 py-0.5">
             DCEWM
